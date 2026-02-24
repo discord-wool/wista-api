@@ -1,0 +1,13 @@
+{
+  "name": "simple-yt-stream",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "build": "chmod +x yt-dlp_linux"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5"
+  }
+}
