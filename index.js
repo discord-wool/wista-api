@@ -1,32 +1,39 @@
 import express from "express";
 import { spawn, execFile } from "child_process";
-import path from "path";
 import cors from "cors";
+import path from "path";
+import fs from "fs";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // yt-dlp 実行ファイル
-const ytdlpPath = path.resolve("./yt-dlp_linux");
+const ytdlpPath = path.join(process.cwd(), "yt-dlp_linux");
 
-// 必要なら環境変数で上書き可能
-const PROXY_URL = process.env.PROXY_URL || "";
+// 🔥 固定プロキシ
+const PROXY_URL = "http://ytproxy-siawaseok.duckdns.org:3008";
 
 app.use(cors());
 
+if (!fs.existsSync(ytdlpPath)) {
+    console.error("❌ yt-dlp_linux not found:", ytdlpPath);
+}
+
 /**
- * MP4バイナリストリーム
+ * MP4 ストリーム
  * GET /video/:id
  */
 app.get("/video/:id", (req, res) => {
     const videoId = req.params.id;
 
     const args = [
-        ...(PROXY_URL ? ["--proxy", PROXY_URL] : []),
+        "--proxy", PROXY_URL,
         "-f", "best[ext=mp4]/best",
         "-o", "-",
         `https://www.youtube.com/watch?v=${videoId}`
     ];
+
+    console.log("▶ Running:", ytdlpPath, args.join(" "));
 
     const child = spawn(ytdlpPath, args);
 
@@ -35,48 +42,69 @@ app.get("/video/:id", (req, res) => {
     child.stdout.pipe(res);
 
     child.stderr.on("data", (data) => {
-        console.error("[yt-dlp stderr]", data.toString());
-    });
-
-    req.on("close", () => {
-        if (!child.killed) child.kill();
+        console.error("yt-dlp stderr:", data.toString());
     });
 
     child.on("error", (err) => {
-        console.error("yt-dlp start error:", err);
-        if (!res.headersSent) res.status(500).end();
+        console.error("Spawn error:", err);
+        if (!res.headersSent) {
+            res.status(500).json({ error: "yt-dlp execution failed" });
+        }
+    });
+
+    child.on("close", (code) => {
+        console.log("yt-dlp exited with code:", code);
+    });
+
+    req.on("close", () => {
+        if (!child.killed) child.kill("SIGKILL");
     });
 });
 
 /**
- * 直リンク取得 → リダイレクト
+ * 直リンク取得
  * GET /stream/:id
  */
 app.get("/stream/:id", (req, res) => {
     const videoId = req.params.id;
 
     const args = [
-        ...(PROXY_URL ? ["--proxy", PROXY_URL] : []),
+        "--proxy", PROXY_URL,
         "--get-url",
         "-f", "best[ext=mp4]/best",
         `https://www.youtube.com/watch?v=${videoId}`
     ];
 
-    execFile(ytdlpPath, args, (err, stdout) => {
-        if (err) {
-            console.error("get-url error:", err);
-            return res.status(500).json({ error: "Failed to fetch stream URL" });
-        }
+    execFile(
+        ytdlpPath,
+        args,
+        { maxBuffer: 1024 * 1024 * 10 },
+        (err, stdout, stderr) => {
+            if (err) {
+                console.error("execFile error:", err);
+                console.error("stderr:", stderr);
+                return res.status(500).json({
+                    error: "Failed to fetch stream URL"
+                });
+            }
 
-        const directUrl = stdout.trim();
-        res.redirect(directUrl);
-    });
+            const url = stdout.trim();
+
+            if (!url) {
+                return res.status(500).json({
+                    error: "Empty stream URL"
+                });
+            }
+
+            res.redirect(url);
+        }
+    );
 });
 
 app.get("/", (req, res) => {
-    res.send("Simple yt-dlp Stream API is running 🚀");
+    res.send("🚀 Proxy-enabled yt-dlp API running");
 });
 
-app.listen(PORT, () => {
-    console.log(`🚀 Server running on http://localhost:${PORT}`);
+app.listen(PORT, "0.0.0.0", () => {
+    console.log(`🚀 Server running on port ${PORT}`);
 });
