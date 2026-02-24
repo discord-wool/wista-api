@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: simple-yt-stream
+    runtime: node
+    region: singapore
+    plan: free
+    buildCommand: |
+      npm install
+      chmod +x yt-dlp_linux
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 18
