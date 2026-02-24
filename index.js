@@ -1,44 +1,82 @@
 import express from "express";
-import { Innertube, UniversalCache } from "youtubei.js";
+import { spawn, execFile } from "child_process";
 import path from "path";
 import cors from "cors";
 
-// 各ルートのインポート
-import { initStreamRoutes } from "./routes/stream.js";
-import { initInfoRoutes } from "./routes/info.js";
-import { initChannelRoutes } from "./routes/channel.js";
-
 const app = express();
 const PORT = process.env.PORT || 3000;
-const ytdlpPath = path.resolve(process.cwd(), 'yt-dlp_linux');
-const PROXY_URL = "http://ytproxy-siawaseok.duckdns.org:3007";
+
+// yt-dlp 実行ファイル
+const ytdlpPath = path.resolve("./yt-dlp_linux");
+
+// 必要なら環境変数で上書き可能
+const PROXY_URL = process.env.PROXY_URL || "";
 
 app.use(cors());
-app.use(express.json());
-app.use(express.static(path.join(process.cwd(), 'public')));
 
-async function startServer() {
-    // YouTubeクライアントの初期化 (共通利用)
-    const youtube = await Innertube.create({
-        lang: "ja",
-        location: "JP",
-        cache: new UniversalCache(false),
-        generate_session_locally: true,
+/**
+ * MP4バイナリストリーム
+ * GET /video/:id
+ */
+app.get("/video/:id", (req, res) => {
+    const videoId = req.params.id;
+
+    const args = [
+        ...(PROXY_URL ? ["--proxy", PROXY_URL] : []),
+        "-f", "best[ext=mp4]/best",
+        "-o", "-",
+        `https://www.youtube.com/watch?v=${videoId}`
+    ];
+
+    const child = spawn(ytdlpPath, args);
+
+    res.setHeader("Content-Type", "video/mp4");
+
+    child.stdout.pipe(res);
+
+    child.stderr.on("data", (data) => {
+        console.error("[yt-dlp stderr]", data.toString());
     });
 
-    // 各モジュールの初期化
-    initStreamRoutes(app, ytdlpPath, PROXY_URL);
-    initInfoRoutes(app, youtube);
-    initChannelRoutes(app, youtube);
-
-    // ルートパスで index.html を返す
-    app.get('/', (req, res) => {
-        res.sendFile(path.join(process.cwd(), 'public', 'index.html'));
+    req.on("close", () => {
+        if (!child.killed) child.kill();
     });
 
-    app.listen(PORT, () => {
-        console.log(`🚀 Server ready at http://localhost:${PORT}`);
+    child.on("error", (err) => {
+        console.error("yt-dlp start error:", err);
+        if (!res.headersSent) res.status(500).end();
     });
-}
+});
 
-startServer().catch(console.error);
+/**
+ * 直リンク取得 → リダイレクト
+ * GET /stream/:id
+ */
+app.get("/stream/:id", (req, res) => {
+    const videoId = req.params.id;
+
+    const args = [
+        ...(PROXY_URL ? ["--proxy", PROXY_URL] : []),
+        "--get-url",
+        "-f", "best[ext=mp4]/best",
+        `https://www.youtube.com/watch?v=${videoId}`
+    ];
+
+    execFile(ytdlpPath, args, (err, stdout) => {
+        if (err) {
+            console.error("get-url error:", err);
+            return res.status(500).json({ error: "Failed to fetch stream URL" });
+        }
+
+        const directUrl = stdout.trim();
+        res.redirect(directUrl);
+    });
+});
+
+app.get("/", (req, res) => {
+    res.send("Simple yt-dlp Stream API is running 🚀");
+});
+
+app.listen(PORT, () => {
+    console.log(`🚀 Server running on http://localhost:${PORT}`);
+});
