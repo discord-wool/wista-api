@@ -11,7 +11,7 @@ const PORT = process.env.PORT || 3000;
 const ytdlpPath = path.resolve("yt-dlp_linux");
 
 // 🔥 固定プロキシ（必須）
-const PROXY_URL = "http://ytproxy-siawaseok.duckdns.org:3008";
+const PROXY_URL = "http://ytproxy-siawaseok.duckdns.org:3007";
 
 app.use(cors());
 
