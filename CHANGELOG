@@ -1,0 +1,15 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+## [1.0.0] - 2026-02-25
+### Added
+- Initial API server
+- Proxy support
+- Basic routing
+
+---
+
+## Versioning
+This project follows:
+MAJOR.MINOR.PATCH
