@@ -1,5 +1,5 @@
 import express from "express";
-import { spawn, execFile } from "child_process";
+import { execFile } from "child_process";
 import cors from "cors";
 import path from "path";
 import fs from "fs";
@@ -10,99 +10,119 @@ const PORT = process.env.PORT || 3000;
 // yt-dlp 実行ファイル
 const ytdlpPath = path.join(process.cwd(), "yt-dlp_linux");
 
-// 🔥 固定プロキシ
+// 🔥 固定プロキシ（必須）
 const PROXY_URL = "http://ytproxy-siawaseok.duckdns.org:3008";
 
 app.use(cors());
 
+// yt-dlp 存在チェック
 if (!fs.existsSync(ytdlpPath)) {
     console.error("❌ yt-dlp_linux not found:", ytdlpPath);
 }
 
 /**
- * MP4 ストリーム
- * GET /video/:id
+ * yt-dlp から全フォーマット情報を取得
  */
-app.get("/video/:id", (req, res) => {
+function getAllFormats(videoId) {
+    return new Promise((resolve, reject) => {
+        const args = [
+            "--proxy", PROXY_URL,
+            "--dump-json",
+            `https://www.youtube.com/watch?v=${videoId}`
+        ];
+
+        execFile(
+            ytdlpPath,
+            args,
+            { maxBuffer: 1024 * 1024 * 20 },
+            (err, stdout, stderr) => {
+                if (err) {
+                    console.error("yt-dlp error:", err);
+                    console.error(stderr);
+                    return reject(new Error("Failed to fetch formats"));
+                }
+
+                let json;
+                try {
+                    json = JSON.parse(stdout);
+                } catch (e) {
+                    return reject(new Error("Invalid JSON from yt-dlp"));
+                }
+
+                const formats = json.formats || [];
+
+                const streams = formats
+                    .filter(f => f.url)
+                    .map(f => ({
+                        url: f.url,
+                        quality: f.format_note || f.height || "unknown",
+                        ext: f.ext || "unknown",
+                        fps: f.fps || null,
+                        size: f.filesize || null,
+                        format_id: f.format_id
+                    }));
+
+                resolve(streams);
+            }
+        );
+    });
+}
+
+/**
+ * /video/:id
+ * → 全ストリームを JSON で返す
+ */
+app.get("/video/:id", async (req, res) => {
     const videoId = req.params.id;
 
-    const args = [
-        "--proxy", PROXY_URL,
-        "-f", "best[ext=mp4]/best",
-        "-o", "-",
-        `https://www.youtube.com/watch?v=${videoId}`
-    ];
+    if (!/^[a-zA-Z0-9_-]{6,20}$/.test(videoId)) {
+        return res.status(400).json({ error: "Invalid video ID" });
+    }
 
-    console.log("▶ Running:", ytdlpPath, args.join(" "));
-
-    const child = spawn(ytdlpPath, args);
-
-    res.setHeader("Content-Type", "video/mp4");
-
-    child.stdout.pipe(res);
-
-    child.stderr.on("data", (data) => {
-        console.error("yt-dlp stderr:", data.toString());
-    });
-
-    child.on("error", (err) => {
-        console.error("Spawn error:", err);
-        if (!res.headersSent) {
-            res.status(500).json({ error: "yt-dlp execution failed" });
-        }
-    });
-
-    child.on("close", (code) => {
-        console.log("yt-dlp exited with code:", code);
-    });
-
-    req.on("close", () => {
-        if (!child.killed) child.kill("SIGKILL");
-    });
+    try {
+        const streams = await getAllFormats(videoId);
+        res.json({ streams });
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: "Failed to fetch stream list" });
+    }
 });
 
 /**
- * 直リンク取得
- * GET /stream/:id
+ * /stream/:id
+ * → HLS 優先で自動リダイレクト
  */
-app.get("/stream/:id", (req, res) => {
+app.get("/stream/:id", async (req, res) => {
     const videoId = req.params.id;
 
-    const args = [
-        "--proxy", PROXY_URL,
-        "--get-url",
-        "-f", "best[ext=mp4]/best",
-        `https://www.youtube.com/watch?v=${videoId}`
-    ];
+    if (!/^[a-zA-Z0-9_-]{6,20}$/.test(videoId)) {
+        return res.status(400).json({ error: "Invalid video ID" });
+    }
 
-    execFile(
-        ytdlpPath,
-        args,
-        { maxBuffer: 1024 * 1024 * 10 },
-        (err, stdout, stderr) => {
-            if (err) {
-                console.error("execFile error:", err);
-                console.error("stderr:", stderr);
-                return res.status(500).json({
-                    error: "Failed to fetch stream URL"
-                });
-            }
+    try {
+        const streams = await getAllFormats(videoId);
 
-            const url = stdout.trim();
+        // HLS 優先
+        const hls = streams.find(s => s.ext === "m3u8");
+        if (hls) return res.redirect(hls.url);
 
-            if (!url) {
-                return res.status(500).json({
-                    error: "Empty stream URL"
-                });
-            }
+        // 次に MP4
+        const mp4 = streams.find(s => s.ext === "mp4");
+        if (mp4) return res.redirect(mp4.url);
 
-            res.redirect(url);
-        }
-    );
+        return res.status(404).json({ error: "No playable stream found" });
+
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: "Failed to resolve stream URL" });
+    }
 });
 
+/**
+ * 動作確認用
+ */
 app.get("/", (req, res) => {
-    res.send("🚀 Proxy-enabled yt-dlp API running");
+    res.send("🚀 Proxy-enabled yt-dlp API running (HLS + MP4)");
 });
 
 app.listen(PORT, "0.0.0.0", () => {
