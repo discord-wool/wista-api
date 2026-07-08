@@ -10,8 +10,11 @@ const PORT = process.env.PORT || 3000;
 // yt-dlp 実行ファイル
 const ytdlpPath = path.resolve("yt-dlp_linux");
 
-// 🔥 固定プロキシ（必須）
-const PROXY_URL = "http://ytproxy-siawaseok.duckdns.org:3007";
+// 🔄 GASのPACファイルURL
+const PAC_URL = "https://script.google.com/macros/s/AKfycbyx5Hks2tp4XcUjQdRfo6BinXnwTiLlAvn-BZlRf8Fbrh22qndC80ohyiNwZ9gps-VFJg/exec";
+
+// メモリ上に保持するプロキシ候補リスト
+let cachedProxies = [];
 
 app.use(cors());
 
@@ -29,36 +32,81 @@ if (!fs.existsSync(ytdlpPath)) {
 }
 
 /**
- * 🔍 共通：全フォーマット取得
+ * 🌐 GASからPACテキストを取得し、yt-dlpが使えるURL配列に変換する
+ */
+async function updateProxyList() {
+    try {
+        console.log("🔄 Fetching proxy list from GAS...");
+        const response = await fetch(PAC_URL);
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+        
+        const text = await response.text();
+        
+        // 文字列から "PROXY ip:port" や "SOCKS5 ip:port" を抽出
+        const matches = text.match(/(SOCKS5|PROXY|SOCKS)\s+([0-9.]+:[0-9]+)/gi);
+        
+        if (!matches) {
+            console.warn("⚠️ No proxies found in PAC text.");
+            return;
+        }
+
+        // yt-dlp が認識できる形式 (http://... や socks5://...) に一括変換
+        cachedProxies = matches.map(item => {
+            const [type, hostport] = item.split(/\s+/);
+            const lowerType = type.toLowerCase();
+            
+            if (lowerType.startsWith("socks")) {
+                return `socks5://${hostport}`;
+            }
+            return `http://${hostport}`; // PROXY は http://
+        });
+
+        console.log(`✅ Proxy list updated! Total proxies: ${cachedProxies.length}`);
+    } catch (err) {
+        console.error("❌ Failed to update proxy list:", err.message);
+    }
+}
+
+// 起動時にプロキシリストを取得し、以後1時間ごとに自動更新
+updateProxyList();
+setInterval(updateProxyList, 1000 * 60 * 60);
+
+/**
+ * 🔍 共通：全フォーマット取得（プロキシを上から順に自動で試行）
  */
 function getAllFormats(videoId) {
-    return new Promise((resolve, reject) => {
-        const args = [
-            "--proxy", PROXY_URL,
-            "--dump-json",
-            `https://www.youtube.com/watch?v=${videoId}`
-        ];
+    return new Promise(async (resolve, reject) => {
+        // プロキシリストが空なら直接接続も辞さない(最後尾にnullを入れる)
+        const proxiesToTry = [...cachedProxies, null]; 
+        let lastError = null;
 
-        execFile(
-            ytdlpPath,
-            args,
-            { maxBuffer: 1024 * 1024 * 50 },
-            (err, stdout, stderr) => {
-                if (err) {
-                    console.error("yt-dlp error:", err);
-                    console.error(stderr);
-                    return reject(new Error("Failed to fetch formats"));
+        // 上から順に試すループ
+        for (const proxy of proxiesToTry) {
+            try {
+                const args = ["--dump-json"];
+                
+                if (proxy) {
+                    args.push("--proxy", proxy);
                 }
+                args.push(`https://www.youtube.com/watch?v=${videoId}`);
 
-                let json;
-                try {
-                    json = JSON.parse(stdout);
-                } catch (e) {
-                    return reject(new Error("Invalid JSON from yt-dlp"));
-                }
+                const result = await new Promise((res, rej) => {
+                    execFile(
+                        ytdlpPath,
+                        args,
+                        { maxBuffer: 1024 * 1024 * 50 },
+                        (err, stdout, stderr) => {
+                            if (err) {
+                                return rej({ err, stderr, proxy });
+                            }
+                            res(stdout);
+                        }
+                    );
+                });
 
+                // 成功したらパースして終了
+                let json = JSON.parse(result);
                 const formats = json.formats || [];
-
                 const streams = formats
                     .filter(f => f.url)
                     .map(f => ({
@@ -70,9 +118,19 @@ function getAllFormats(videoId) {
                         format_id: f.format_id
                     }));
 
-                resolve(streams);
+                console.log(`✨ Success using proxy: ${proxy || "DIRECT"}`);
+                return resolve(streams);
+
+            } catch (fail) {
+                console.warn(`⚠️ Proxy failed: ${fail.proxy || "DIRECT"}. Trying next...`);
+                lastError = fail.stderr || fail.err;
+                // ループが継続し、自動で次のプロキシが試されます
             }
-        );
+        }
+
+        // すべて全滅した場合
+        console.error("❌ All proxies failed.");
+        reject(new Error("Failed to fetch formats with all available proxies"));
     });
 }
 
@@ -91,23 +149,17 @@ app.get("/", (req, res) => {
         </head>
         <body>
             <h1>🚀 Wista Stream API</h1>
-            <p>プロキシ: <b>${PROXY_URL}</b></p>
+            <p>有効なプロキシプール数: <b>${cachedProxies.length} 個</b></p>
 
             <h2>📌 エンドポイント一覧</h2>
-
             <h3>1. 自動ストリームリダイレクト</h3>
             <code>/api/stream/:id</code>
-            <p>HLS → MP4 の順で自動リダイレクト</p>
-
             <h3>2. HLS のみリダイレクト</h3>
             <code>/api/m3u8/:id</code>
-
             <h3>3. 全ストリーム JSON</h3>
             <code>/api/video/:id</code>
-
             <h3>4. ヘルスチェック</h3>
             <code>/health</code>
-
             <hr>
             <p>Made for Wista</p>
         </body>
@@ -122,66 +174,48 @@ app.get("/health", (req, res) => {
     res.json({
         status: "ok",
         ytdlp: fs.existsSync(ytdlpPath),
-        proxy: PROXY_URL,
+        total_proxies: cachedProxies.length,
+        proxies: cachedProxies,
         timestamp: Date.now()
     });
 });
 
 /**
- * 🔥 /api/stream/:id → HLS → MP4 の順で自動リダイレクト
+ * 🔥 各種APIエンドポイント
  */
 app.get("/api/stream/:id", async (req, res) => {
     const videoId = req.params.id;
-
     try {
         const streams = await getAllFormats(videoId);
-
         const hls = streams.find(s => s.ext === "m3u8");
         if (hls) return res.redirect(hls.url);
-
         const mp4 = streams.find(s => s.ext === "mp4");
         if (mp4) return res.redirect(mp4.url);
-
         return res.status(404).json({ error: "No playable stream found" });
-
     } catch (e) {
-        console.error(e);
-        res.status(500).json({ error: "Failed to resolve stream URL" });
+        res.status(500).json({ error: e.message });
     }
 });
 
-/**
- * 📺 /api/m3u8/:id → HLS のみリダイレクト
- */
 app.get("/api/m3u8/:id", async (req, res) => {
     const videoId = req.params.id;
-
     try {
         const streams = await getAllFormats(videoId);
-
         const hls = streams.find(s => s.ext === "m3u8");
         if (hls) return res.redirect(hls.url);
-
         return res.status(404).json({ error: "No HLS stream found" });
-
     } catch (e) {
-        console.error(e);
-        res.status(500).json({ error: "Failed to fetch HLS stream" });
+        res.status(500).json({ error: e.message });
     }
 });
 
-/**
- * 🎥 /api/video/:id → 全ストリーム JSON
- */
 app.get("/api/video/:id", async (req, res) => {
     const videoId = req.params.id;
-
     try {
         const streams = await getAllFormats(videoId);
         res.json({ streams });
     } catch (e) {
-        console.error(e);
-        res.status(500).json({ error: "Failed to fetch stream list" });
+        res.status(500).json({ error: e.message });
     }
 });
 
