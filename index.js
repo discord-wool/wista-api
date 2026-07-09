@@ -8,7 +8,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // yt-dlp 実行ファイル
-const ytdlpPath = path.resolve("yt-dlp_linux");
+const ytdlpPath = path.resolve("ytdlp_linux");
 
 // 🔄 GASのPACファイルURL
 const PAC_URL = "https://script.google.com/macros/s/AKfycbyx5Hks2tp4XcUjQdRfo6BinXnwTiLlAvn-BZlRf8Fbrh22qndC80ohyiNwZ9gps-VFJg/exec";
